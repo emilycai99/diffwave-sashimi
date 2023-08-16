@@ -20,7 +20,7 @@ from scipy.io.wavfile import write as wavwrite
 from models import construct_model
 from utils import find_max_epoch, print_size, calc_diffusion_hyperparams, local_directory, smooth_ckpt
 
-def sampling(net, size, diffusion_hyperparams, condition=None):
+def sampling(net, size, diffusion_hyperparams, condition=None, sampler=None, loss_sig=False, ar_sample=False,ar_coeff=0.2):
     """
     Perform the complete sampling step according to p(x_0|x_T) = \prod_{t=1}^T p_{\theta}(x_{t-1}|x_t)
 
@@ -44,14 +44,28 @@ def sampling(net, size, diffusion_hyperparams, condition=None):
 
     print('begin sampling, total number of reverse steps = %s' % T)
 
-    x = torch.normal(0, 1, size=size).cuda()
+    if not sampler:
+        x = torch.normal(0, 1, size=size).cuda()
+    else:
+        B,C,L = size
+        if ar_sample:
+            x = sampler.ar_sample([B,C],ar_coeff).cuda()
+        else:
+            x = sampler.sample([B,C]).cuda()
     with torch.no_grad():
         for t in tqdm(range(T-1, -1, -1)):
             diffusion_steps = (t * torch.ones((size[0], 1))).cuda()  # use the corresponding reverse step
             epsilon_theta = net((x, diffusion_steps,), mel_spec=condition)  # predict \epsilon according to \epsilon_\theta
             x = (x - (1-Alpha[t])/torch.sqrt(1-Alpha_bar[t]) * epsilon_theta) / torch.sqrt(Alpha[t])  # update x_{t-1} to \mu_\theta(x_t)
             if t > 0:
-                x = x + Sigma[t] * torch.normal(0, 1, size=size).cuda()  # add the variance term to x_{t-1}
+                if not sampler:
+                    x = x + Sigma[t] * torch.normal(0, 1, size=size).cuda()  # add the variance term to x_{t-1}
+                else:
+                    if ar_sample:
+                        x = x + Sigma[t] * sampler.ar_sample([B,C],ar_coeff).cuda()
+                    else:
+                        x = x + Sigma[t] * sampler.sample([B,C]).cuda()
+                    
     return x
 
 
@@ -68,6 +82,10 @@ def generate(
         ckpt_smooth=None,
         mel_path=None, mel_name=None,
         dataloader=None,
+        sampler=None,
+        loss_sig=False,
+        ar_sample=False,
+        ar_coeff=0.2
     ):
     """
     Generate audio based on ground truth mel spectrogram
@@ -88,7 +106,7 @@ def generate(
     local_path, output_directory = local_directory(name, model_cfg, diffusion_cfg, dataset_cfg, 'waveforms')
 
     # map diffusion hyperparameters to gpu
-    diffusion_hyperparams   = calc_diffusion_hyperparams(**diffusion_cfg, fast=True)  # dictionary of all diffusion hyperparameters
+    diffusion_hyperparams   = calc_diffusion_hyperparams(diffusion_cfg['T'],diffusion_cfg['beta_0'],diffusion_cfg['beta_T'],diffusion_cfg['beta'], fast=True)  # dictionary of all diffusion hyperparameters
 
     # predefine model
     net = construct_model(model_cfg).cuda()
@@ -173,6 +191,10 @@ def generate(
             (batch_size,1,audio_length),
             diffusion_hyperparams,
             condition=ground_truth_mel_spectrogram,
+            sampler=sampler,
+            loss_sig=loss_sig,
+            ar_sample=ar_sample,
+            ar_coeff=ar_coeff
         )
         generated_audio.append(_audio)
     generated_audio = torch.cat(generated_audio, dim=0)

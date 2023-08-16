@@ -215,6 +215,8 @@ class WaveNet(nn.Module):
     @classmethod
     def name(cls, cfg):
         return "wnet_h{}_d{}".format(
-            model_cfg["res_channels"],
-            model_cfg["num_res_layers"],
+            cfg["res_channels"],
+            cfg["num_res_layers"]
+            # model_cfg["res_channels"],
+            # model_cfg["num_res_layers"],
         )

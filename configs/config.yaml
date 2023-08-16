@@ -4,12 +4,13 @@ defaults:
 
 train: # Not used in generate.py
   name: null # Name of experiment (prefix of experiment name)
-  ckpt_iter: max
+  # ckpt_iter: max
+  ckpt_iter: -1
   iters_per_ckpt: 10000
   iters_per_logging: 100
   n_iters: 1000001
   learning_rate: 2e-4
-  batch_size_per_gpu: 4
+  batch_size_per_gpu: 16
 
 generate:
   ckpt_iter: max # Which checkpoint to use; assign a number or "max". Is ignored when sampling during training

@@ -1,6 +1,7 @@
 import os
 import numpy as np
 import torch
+import math
 
 from models import model_identifier
 
@@ -99,7 +100,10 @@ def local_directory(name, model_cfg, diffusion_cfg, dataset_cfg, output_director
 
     # generate experiment (local) path
     model_name = model_identifier(model_cfg)
-    diffusion_name = f"_T{diffusion_cfg['T']}_betaT{diffusion_cfg['beta_T']}"
+    if diffusion_cfg['dependent']:
+        diffusion_name = f"_T{diffusion_cfg['T']}_betaT{diffusion_cfg['beta_T']}_dp{diffusion_cfg['dependent']}_wsz{diffusion_cfg['window_size']}_dr{diffusion_cfg['decay_rate']}_ar{diffusion_cfg['ar_sample']}_coeff{diffusion_cfg['ar_coeff']}_sigloss{diffusion_cfg['loss_sig']}"
+    else:
+        diffusion_name = f"_T{diffusion_cfg['T']}_betaT{diffusion_cfg['beta_T']}_dp{diffusion_cfg['dependent']}"
     if model_cfg["unconditional"]:
         data_name = ""
     else:
@@ -176,3 +180,40 @@ def _bin_op_dict(d0, d1, op):
         return op(d0, d1)
     else: raise Exception("Dictionaries must match keys")
 
+def toeplitz(c, r):
+    vals = torch.cat((r, c[1:].flip(0)))
+    shape = len(c), len(r)
+    i, j = torch.ones(*shape).nonzero().T
+    return vals[j-i].reshape(*shape)
+
+def construct_cov_mat(num_frames,decay_rate):
+    seq = torch.pow(decay_rate,torch.arange(num_frames))
+    return toeplitz(seq,seq)
+
+class Sampler():
+    def __init__(self,num_frames,decay_rate,window_size) -> None:
+        self.num_frames = num_frames
+        self.decay_rate = decay_rate
+        self.window_size = window_size
+        self.cov_mat = construct_cov_mat(window_size,decay_rate)
+        self.sampler = torch.distributions.multivariate_normal.MultivariateNormal(loc=torch.zeros(window_size),covariance_matrix=self.cov_mat)
+        self.window_num = int(num_frames / window_size)
+    
+    def sample(self,shape):
+        B,C = shape
+        return torch.concat([self.sampler.sample([B,C]) for i in range(self.window_num)],axis=2)
+
+    def ar_sample(self,shape,ar_coeff):
+        B,C = shape
+        noise = torch.zeros([B,C,self.num_frames])
+        for i in range(self.window_num):
+            if i == 0:
+                noise[:,:,i*self.window_size:(i+1)*self.window_size] = self.sampler.sample([B,C])
+            else:
+                noise[:,:,i*self.window_size:(i+1)*self.window_size] = math.sqrt(ar_coeff) * noise[:,:,(i-1)*self.window_size:i*self.window_size] + math.sqrt(1-ar_coeff)  * self.sampler.sample([B,C])
+        return noise
+                
+    def cal_loss(self,epsilon,z):
+        x = epsilon-z
+        return torch.matmul(x.T,self.cov_mat,x)
+            

@@ -14,10 +14,10 @@ from typing import Tuple
 import torchaudio
 from torch.utils.data import Dataset
 from torch import Tensor
-from torchaudio.datasets.utils import (
-    download_url,
-    extract_archive,
-)
+# from torchaudio.datasets.utils import (
+#     download_url,
+#     extract_archive,
+# )
 
 HASH_DIVIDER = "_nohash_"
 EXCEPT_FOLDER = "_background_noise_"
@@ -62,3 +62,7 @@ class SpeechCommands(Dataset):
 
     def __len__(self) -> int:
         return len(self._walker)
+
+# if __name__ == '__main__':
+#     dataset = SpeechCommands('/home/qindafei/KX/data/sc09')
+#     print(len(dataset))

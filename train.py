@@ -17,20 +17,16 @@ from tqdm import tqdm
 # from dataset_sc import load_Speech_commands
 # from dataset_ljspeech import load_LJSpeech
 from dataloaders import dataloader
-from utils import find_max_epoch, print_size, calc_diffusion_hyperparams, local_directory
+from utils import find_max_epoch, print_size, calc_diffusion_hyperparams, local_directory, Sampler
 
 from distributed_util import init_distributed, apply_gradient_allreduce, reduce_tensor
 from generate import generate
 
-from models import construct_model
+from models import construct_model\
+    
+import logging
 
 def distributed_train(rank, num_gpus, group_name, cfg):
-    # Initialize logger
-    if rank == 0 and cfg.wandb is not None:
-        wandb_cfg = cfg.pop("wandb")
-        wandb.init(
-            **wandb_cfg, config=OmegaConf.to_container(cfg, resolve=True)
-        )
 
     # Distributed running initialization
     dist_cfg = cfg.pop("distributed")
@@ -71,9 +67,16 @@ def train(
     """
 
     local_path, checkpoint_directory = local_directory(name, model_cfg, diffusion_cfg, dataset_cfg, 'checkpoint')
+    
+    # Initialize logger
+    if rank == 0:
+        logging.basicConfig(filename= f'{checkpoint_directory}/train.log', level=logging.DEBUG,
+                            format='%(asctime)s %(message)s', datefmt='%m/%d/%Y %I:%M:%S',force=True)
+        logging.info('start logging')
+        logging.info(f'{diffusion_cfg}')
 
     # map diffusion hyperparameters to gpu
-    diffusion_hyperparams   = calc_diffusion_hyperparams(**diffusion_cfg, fast=False)  # dictionary of all diffusion hyperparameters
+    diffusion_hyperparams   = calc_diffusion_hyperparams(diffusion_cfg['T'],diffusion_cfg['beta_0'],diffusion_cfg['beta_T'],diffusion_cfg['beta'], fast=False)  # dictionary of all diffusion hyperparameters
 
     # load training data
     trainloader = dataloader(dataset_cfg, batch_size=batch_size_per_gpu, num_gpus=num_gpus, unconditional=model_cfg.unconditional)
@@ -106,15 +109,22 @@ def train(
                 # HACK to reset learning rate
                 optimizer.param_groups[0]['lr'] = learning_rate
 
-            print('Successfully loaded model at iteration {}'.format(ckpt_iter))
+            logging.info('Successfully loaded model at iteration {}'.format(ckpt_iter))
         except:
-            print(f"Model checkpoint found at iteration {ckpt_iter}, but was not successfully loaded - training from scratch.")
+            logging.info(f"Model checkpoint found at iteration {ckpt_iter}, but was not successfully loaded - training from scratch.")
             ckpt_iter = -1
     else:
-        print('No valid checkpoint model found - training from scratch.')
+        logging.info('No valid checkpoint model found - training from scratch.')
         ckpt_iter = -1
 
     # training
+    sampler = None
+    dependent = diffusion_cfg['dependent']
+    if dependent:
+        L = dataset_cfg['segment_length']
+        window_size = diffusion_cfg['window_size']
+        decay_rate = diffusion_cfg['decay_rate']
+        sampler = Sampler(L,decay_rate,window_size)
     n_iter = ckpt_iter + 1
     while n_iter < n_iters + 1:
         epoch_loss = 0.
@@ -131,7 +141,7 @@ def train(
 
             # back-propagation
             optimizer.zero_grad()
-            loss = training_loss(net, nn.MSELoss(), audio, diffusion_hyperparams, mel_spec=mel_spectrogram)
+            loss = training_loss(net, nn.MSELoss(), audio, diffusion_hyperparams, mel_spec=mel_spectrogram, sampler=sampler, loss_sig=diffusion_cfg['loss_sig'],ar_sample=diffusion_cfg['ar_sample'],ar_coeff=diffusion_cfg['ar_coeff'])
             if num_gpus > 1:
                 reduced_loss = reduce_tensor(loss.data, num_gpus).item()
             else:
@@ -147,10 +157,7 @@ def train(
                 # print("iteration: {} \treduced loss: {} \tloss: {}".format(n_iter, reduced_loss, loss.item()))
                 # tb.add_scalar("Log-Train-Loss", torch.log(loss).item(), n_iter)
                 # tb.add_scalar("Log-Train-Reduced-Loss", np.log(reduced_loss), n_iter)
-                wandb.log({
-                    'train/loss': reduced_loss,
-                    'train/log_loss': np.log(reduced_loss),
-                }, step=n_iter)
+                logging.info(f'train/loss: {reduced_loss}; train/log_loss: {np.log(reduced_loss)}')
 
             # save checkpoint
             if n_iter % iters_per_ckpt == 0 and rank == 0:
@@ -158,7 +165,7 @@ def train(
                 torch.save({'model_state_dict': net.state_dict(),
                             'optimizer_state_dict': optimizer.state_dict()},
                            os.path.join(checkpoint_directory, checkpoint_name))
-                print('model at iteration %s is saved' % n_iter)
+                logging.info('model at iteration %s is saved' % n_iter)
 
                 # Generate samples
                 # if model_cfg["unconditional"]:
@@ -177,25 +184,29 @@ def train(
                     # n_samples, n_iter, name,
                     # mel_path=mel_path,
                     # mel_name=mel_name,
+                    sampler=sampler,
+                    loss_sig=diffusion_cfg['loss_sig'],
+                    ar_sample=diffusion_cfg['ar_sample'],
+                    ar_coeff=diffusion_cfg['ar_coeff']
                 )
                 samples = [wandb.Audio(sample.squeeze().cpu(), sample_rate=dataset_cfg['sampling_rate']) for sample in samples]
-                wandb.log(
-                    {'inference/audio': samples},
-                    step=n_iter,
-                    # commit=False,
-                )
+                # wandb.log(
+                #     {'inference/audio': samples},
+                #     step=n_iter,
+                #     # commit=False,
+                # )
 
             n_iter += 1
         if rank == 0:
             epoch_loss /= len(trainloader)
-            wandb.log({'train/loss_epoch': epoch_loss, 'train/log_loss_epoch': np.log(epoch_loss)}, step=n_iter)
+            logging.info(f'train/loss_epoch: {epoch_loss}; train/log_loss_epoch: {np.log(epoch_loss)}')
 
     # Close logger
-    if rank == 0:
-        # tb.close()
-        wandb.finish()
+    # if rank == 0:
+    #     # tb.close()
+    #     wandb.finish()
 
-def training_loss(net, loss_fn, audio, diffusion_hyperparams, mel_spec=None):
+def training_loss(net, loss_fn, audio, diffusion_hyperparams, mel_spec=None, sampler=None, loss_sig=False, ar_sample=False,ar_coeff=0.2):
     """
     Compute the training loss of epsilon and epsilon_theta
 
@@ -216,10 +227,19 @@ def training_loss(net, loss_fn, audio, diffusion_hyperparams, mel_spec=None):
     # audio = X
     B, C, L = audio.shape  # B is batchsize, C=1, L is audio length
     diffusion_steps = torch.randint(T, size=(B,1,1)).cuda()  # randomly sample diffusion steps from 1~T
-    z = torch.normal(0, 1, size=audio.shape).cuda()
+    if not sampler:
+        z = torch.normal(0, 1, size=audio.shape).cuda()
+    else:
+        if ar_sample:
+            z = sampler.ar_sample([B,C],ar_coeff).cuda()
+        else:
+            z = sampler.sample([B,C]).cuda()
     transformed_X = torch.sqrt(Alpha_bar[diffusion_steps]) * audio + torch.sqrt(1-Alpha_bar[diffusion_steps]) * z  # compute x_t from q(x_t|x_0)
     epsilon_theta = net((transformed_X, diffusion_steps.view(B,1),), mel_spec=mel_spec)  # predict \epsilon according to \epsilon_\theta
-    return loss_fn(epsilon_theta, z)
+    if not loss_sig:
+        return loss_fn(epsilon_theta, z)
+    else:
+        return sampler.cal_loss(epsilon_theta,z)
 
 
 
