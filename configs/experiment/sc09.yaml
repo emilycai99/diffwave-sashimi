@@ -8,9 +8,9 @@ diffusion:
   beta_0: 0.0001
   beta_T: 0.02
   beta: null
-  dependent: False
+  dependent: True
   window_size: 16
   decay_rate: 0.1
-  loss_sig: False
-  ar_sample: True
-  ar_coeff: 0.2
+  loss_sig: True
+  ar_sample: False
+  ar_coeff: 0.1

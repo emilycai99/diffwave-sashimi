@@ -18,7 +18,7 @@ from scipy.io.wavfile import write as wavwrite
 # from scipy.io.wavfile import read as wavread
 
 from models import construct_model
-from utils import find_max_epoch, print_size, calc_diffusion_hyperparams, local_directory, smooth_ckpt
+from utils import find_max_epoch, print_size, calc_diffusion_hyperparams, local_directory, smooth_ckpt, Sampler
 
 def sampling(net, size, diffusion_hyperparams, condition=None, sampler=None, loss_sig=False, ar_sample=False,ar_coeff=0.2):
     """
@@ -185,6 +185,14 @@ def generate(
 
     generated_audio = []
 
+    if sampler is None:
+        dependent = diffusion_cfg['dependent']
+        if dependent:
+            L = dataset_cfg['segment_length']
+            window_size = diffusion_cfg['window_size']
+            decay_rate = diffusion_cfg['decay_rate']
+            sampler = Sampler(L,decay_rate,window_size)
+
     for _ in range(n_samples // batch_size):
         _audio = sampling(
             net,
@@ -224,6 +232,8 @@ def generate(
 
 @hydra.main(version_base=None, config_path="configs/", config_name="config")
 def main(cfg: DictConfig) -> None:
+    os.environ["OMP_NUM_THREADS"] = "10"
+    torch.set_num_threads(10)
     print(OmegaConf.to_yaml(cfg))
     OmegaConf.set_struct(cfg, False)  # Allow writing keys
 

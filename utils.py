@@ -213,7 +213,11 @@ class Sampler():
                 noise[:,:,i*self.window_size:(i+1)*self.window_size] = math.sqrt(ar_coeff) * noise[:,:,(i-1)*self.window_size:i*self.window_size] + math.sqrt(1-ar_coeff)  * self.sampler.sample([B,C])
         return noise
                 
-    def cal_loss(self,epsilon,z):
+    def cal_loss(self,epsilon,z,ar_sample=False,ar_coeff=0.2):
         x = epsilon-z
-        return torch.matmul(x.T,self.cov_mat,x)
-            
+        loss = 0
+        if not ar_sample:
+            for i in range(self.window_num):
+                loss += torch.matmul(torch.matmul(x[:,:,i*self.window_size:(i+1)*self.window_size],self.cov_mat.cuda()),torch.permute(x[:,:,i*self.window_size:(i+1)*self.window_size],(0,2,1)))
+        return loss.mean()
+           

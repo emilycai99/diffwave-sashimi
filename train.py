@@ -245,6 +245,8 @@ def training_loss(net, loss_fn, audio, diffusion_hyperparams, mel_spec=None, sam
 
 @hydra.main(version_base=None, config_path="configs/", config_name="config")
 def main(cfg: DictConfig) -> None:
+    os.environ["OMP_NUM_THREADS"] = "10"
+    torch.set_num_threads(10)
     print(OmegaConf.to_yaml(cfg))
     OmegaConf.set_struct(cfg, False)  # Allow writing keys
 
